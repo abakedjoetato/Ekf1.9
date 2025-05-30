@@ -209,7 +209,7 @@ class EmeraldKillfeedBot(commands.Bot):
                 if "rate limited" in error_msg or "429" in error_msg:
                     logger.error(f"❌ Global sync rate limited: {e}")
                     
-                    # Extract retry time and save cooldown
+                    # Extract retry time and save cooldown for future attempts
                     retry_match = re.search(r'Retrying in ([\d.]+) seconds', str(e))
                     if retry_match:
                         retry_time = float(retry_match.group(1))
@@ -217,7 +217,9 @@ class EmeraldKillfeedBot(commands.Bot):
                         with open(rate_limit_file, 'w') as f:
                             f.write(str(cooldown_until))
                         logger.error(f"💾 Rate limit cooldown saved for {retry_time + 60}s")
-                    return
+                    
+                    # Continue to guild fallback instead of returning
+                    logger.info("🏠 Global sync rate limited - proceeding to guild fallback")
                 else:
                     logger.warning(f"⚠️ Global sync failed: {e} - proceeding to guild fallback")
 
@@ -231,9 +233,10 @@ class EmeraldKillfeedBot(commands.Bot):
                     break
                     
                 try:
-                    await asyncio.wait_for(self.sync_commands(guild=guild), timeout=15)
+                    # Use py-cord specific guild sync method
+                    synced = await asyncio.wait_for(self.sync_commands(guild=guild), timeout=15)
                     success_count += 1
-                    logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name}")
+                    logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name} ({len(synced) if synced else 0} commands)")
                     
                     # Small delay between guild syncs to avoid rate limits
                     if success_count < len(self.guilds):
