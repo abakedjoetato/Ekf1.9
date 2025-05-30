@@ -135,18 +135,39 @@ class EmeraldKillfeedBot(commands.Bot):
                     failed_cogs.append(cog)
                     logger.error(f"❌ Failed to load cog {cog}: {e}")
 
-            # Verify commands are registered
+            # Verify commands are registered with detailed debugging
             try:
-                command_count = len(self.application_commands) if hasattr(self, 'application_commands') else 0
+                command_count = 0
+                command_source = "none"
+                
+                # Check multiple possible command storage locations
+                if hasattr(self, 'application_commands'):
+                    command_count = len(self.application_commands)
+                    command_source = "application_commands"
+                elif hasattr(self, 'pending_application_commands'):
+                    command_count = len(self.pending_application_commands)
+                    command_source = "pending_application_commands"
+                elif hasattr(self, 'slash_commands'):
+                    command_count = len(self.slash_commands)
+                    command_source = "slash_commands"
+                
                 logger.info(f"📊 Loaded {len(loaded_cogs)}/{len(cogs)} cogs successfully")
-                logger.info(f"📊 Total slash commands registered: {command_count}")
+                logger.info(f"📊 Total slash commands registered: {command_count} (via {command_source})")
 
                 # Debug: List actual commands found
                 if command_count > 0:
-                    command_names = [cmd.name for cmd in self.application_commands]
+                    if command_source == "application_commands":
+                        command_names = [cmd.name for cmd in self.application_commands]
+                    elif command_source == "pending_application_commands":
+                        command_names = [cmd.name for cmd in self.pending_application_commands]
+                    elif command_source == "slash_commands":
+                        command_names = [cmd.name for cmd in self.slash_commands]
                     logger.info(f"🔍 Commands found: {', '.join(command_names)}")
                 else:
-                    logger.info("ℹ️ Commands will be synced after connection")
+                    # Show what command-related attributes exist
+                    cmd_attrs = [attr for attr in dir(self) if 'command' in attr.lower()]
+                    logger.info(f"🔍 Available command attributes: {cmd_attrs}")
+                    logger.info("ℹ️ Commands will be registered after py-cord processing")
             except Exception as e:
                 logger.warning(f"Command count check failed: {e}")
 
@@ -167,17 +188,34 @@ class EmeraldKillfeedBot(commands.Bot):
         Implements requirements: global sync first, then per-guild fallback on failure
         """
         try:
-            # Get command count from the correct attribute
-            command_count = len(self.application_commands) if hasattr(self, 'application_commands') else 0
-            logger.info(f"📊 {command_count} commands registered locally")
+            # Try multiple attributes to find commands
+            command_count = 0
+            commands_source = "none"
+            command_names = []
+            
+            if hasattr(self, 'application_commands') and self.application_commands:
+                command_count = len(self.application_commands)
+                command_names = [cmd.name for cmd in self.application_commands]
+                commands_source = "application_commands"
+            elif hasattr(self, 'pending_application_commands') and self.pending_application_commands:
+                command_count = len(self.pending_application_commands)
+                command_names = [cmd.name for cmd in self.pending_application_commands]
+                commands_source = "pending_application_commands"
+            elif hasattr(self, 'slash_commands') and self.slash_commands:
+                command_count = len(self.slash_commands)
+                command_names = [cmd.name for cmd in self.slash_commands]
+                commands_source = "slash_commands"
+            
+            logger.info(f"📊 {command_count} commands found via {commands_source}")
             
             # Debug: Show actual command names
             if command_count > 0:
-                command_names = [cmd.name for cmd in self.application_commands]
                 logger.info(f"🔍 Commands to sync: {', '.join(command_names[:10])}{'...' if len(command_names) > 10 else ''}")
-
-            if command_count == 0:
-                logger.warning("⚠️ No commands to sync")
+            else:
+                # Debug all available attributes
+                attrs = [attr for attr in dir(self) if 'command' in attr.lower()]
+                logger.warning(f"🔍 Available command attributes: {attrs}")
+                logger.warning("⚠️ No commands to sync - this may indicate a cog loading issue")
                 return
 
             # Check for existing rate limit
@@ -353,10 +391,32 @@ class EmeraldKillfeedBot(commands.Bot):
             cogs_success = await self.load_cogs()
             logger.info(f"🎯 Cog loading: {'✅ Complete' if cogs_success else '❌ Failed'}")
 
-            # STEP 2: Wait for py-cord to process commands
-            logger.info("⏱️ Waiting 3 seconds for py-cord to process commands...")
-            await asyncio.sleep(3.0)
-            logger.info("⏱️ Wait completed, proceeding to command sync...")
+            # STEP 2: Wait for py-cord to process commands with active checking
+            logger.info("⏱️ Waiting for py-cord to register commands...")
+            max_wait = 10  # Maximum 10 seconds
+            wait_time = 0
+            
+            while wait_time < max_wait:
+                await asyncio.sleep(1)
+                wait_time += 1
+                
+                # Check different command attributes that py-cord might use
+                cmd_count = 0
+                if hasattr(self, 'application_commands'):
+                    cmd_count = len(self.application_commands)
+                elif hasattr(self, 'pending_application_commands'):
+                    cmd_count = len(self.pending_application_commands)
+                elif hasattr(self, 'slash_commands'):
+                    cmd_count = len(self.slash_commands)
+                
+                logger.info(f"⏱️ Wait {wait_time}s - Commands detected: {cmd_count}")
+                
+                if cmd_count > 0:
+                    logger.info(f"✅ Commands registered after {wait_time}s - proceeding to sync")
+                    break
+                    
+            if wait_time >= max_wait:
+                logger.warning("⚠️ Timeout waiting for commands - proceeding anyway")
 
             # STEP 3: Advanced command sync with logging
             logger.info("🔧 Starting advanced command sync system...")
