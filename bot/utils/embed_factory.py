@@ -174,7 +174,10 @@ class EmbedFactory:
 
         embed = cls.build_base_embed(title, description, color, 'connection')
         embed.add_field(name="Player", value=player_name, inline=True)
-        embed.add_field(name="Player ID", value=player_id[:8], inline=True)
+        
+        # Add server info if available
+        server_info = kwargs.get('server_name', 'Unknown Server')
+        embed.add_field(name="Server", value=server_info, inline=True)
 
         return embed
 

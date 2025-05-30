@@ -260,7 +260,7 @@ class UnifiedLogParser:
             logger.error(f"Error getting log content: {e}")
             return None
 
-    async def parse_log_content(self, content: str, guild_id: str, server_id: str, cold_start: bool = False) -> List[discord.Embed]:
+    async def parse_log_content(self, content: str, guild_id: str, server_id: str, cold_start: bool = False, server_name: str = "Unknown Server") -> List[discord.Embed]:
         """Parse log content and return embeds"""
         embeds = []
         if not content:
@@ -333,7 +333,8 @@ class UnifiedLogParser:
                             title="Player Connected",
                             description="New player has joined the server",
                             player_name=player_name,
-                            player_id=player_id
+                            player_id=player_id,
+                            server_name=server_name
                         )
                         embeds.append(embed)
 
@@ -361,7 +362,8 @@ class UnifiedLogParser:
                             title="Player Disconnected",
                             description="Player has left the server",
                             player_name=player_name,
-                            player_id=player_id
+                            player_id=player_id,
+                            server_name=server_name
                         )
                         embeds.append(embed)
 
@@ -745,8 +747,8 @@ class UnifiedLogParser:
             file_state = self.file_states.get(server_key, {})
             is_cold_start = not file_state.get('cold_start_complete', False)
 
-            # Parse content
-            embeds = await self.parse_log_content(content, str(guild_id), server_id, is_cold_start)
+            # Parse content with server context
+            embeds = await self.parse_log_content(content, str(guild_id), server_id, is_cold_start, server_name)
 
             # Send embeds (only if not cold start)
             if not is_cold_start and embeds:
@@ -889,50 +891,95 @@ class UnifiedLogParser:
             logger.error(f"Error resetting parser state: {e}")
 
     async def resolve_player_name(self, player_id: str, guild_id: str) -> str:
-        """Resolve player name from ID using database and session cache"""
+        """Resolve player name from ID using comprehensive database and session cache"""
         try:
             # Check cache first
             cache_key = f"{guild_id}_{player_id}"
             if cache_key in self.player_name_cache:
                 return self.player_name_cache[cache_key]
             
-            # Check current session lifecycle
+            # Check current session lifecycle first (most recent)
             if cache_key in self.player_lifecycle:
                 name = self.player_lifecycle[cache_key].get('name')
-                if name and name != 'Unknown Player':
+                if name and name.strip() and name != 'Unknown Player':
                     self.player_name_cache[cache_key] = name
                     return name
             
-            # Check database
+            # Check database with multiple methods
             if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
                 try:
+                    # Method 1: Check linked players table
                     player_doc = await self.bot.db_manager.players.find_one({
                         'guild_id': int(guild_id),
                         'player_id': player_id
                     })
                     
                     if player_doc:
-                        name = player_doc.get('player_name', 'Unknown Player')
-                        if name and name != 'Unknown Player':
+                        name = player_doc.get('player_name')
+                        if name and name.strip() and name != 'Unknown Player':
                             self.player_name_cache[cache_key] = name
                             return name
                     
-                    # Check PvP data collection for historical names
+                    # Method 2: Check PvP data collection (most comprehensive)
                     pvp_doc = await self.bot.db_manager.pvp_data.find_one({
                         'guild_id': int(guild_id),
                         'player_id': player_id
                     })
                     
                     if pvp_doc:
-                        name = pvp_doc.get('player_name', 'Unknown Player')
-                        if name and name != 'Unknown Player':
+                        name = pvp_doc.get('player_name')
+                        if name and name.strip() and name != 'Unknown Player':
                             self.player_name_cache[cache_key] = name
                             return name
+                    
+                    # Method 3: Search PvP data by partial player_id match (sometimes IDs change)
+                    partial_id = player_id[:8] if len(player_id) > 8 else player_id
+                    pvp_cursor = self.bot.db_manager.pvp_data.find({
+                        'guild_id': int(guild_id),
+                        'player_id': {'$regex': f'^{partial_id}', '$options': 'i'}
+                    }).sort('timestamp', -1).limit(1)
+                    
+                    async for pvp_doc in pvp_cursor:
+                        name = pvp_doc.get('player_name')
+                        if name and name.strip() and name != 'Unknown Player':
+                            self.player_name_cache[cache_key] = name
+                            # Update the record with correct player_id
+                            try:
+                                await self.bot.db_manager.pvp_data.update_one(
+                                    {'_id': pvp_doc['_id']},
+                                    {'$set': {'player_id': player_id}}
+                                )
+                            except:
+                                pass
+                            return name
+                    
+                    # Method 4: Check if player has ever been linked to Discord
+                    linked_doc = await self.bot.db_manager.players.find_one({
+                        'guild_id': int(guild_id),
+                        'linked_characters': {'$exists': True}
+                    })
+                    
+                    if linked_doc and 'linked_characters' in linked_doc:
+                        # Try to find this player_id in historical data for any of these characters
+                        for char_name in linked_doc.get('linked_characters', []):
+                            historical_doc = await self.bot.db_manager.pvp_data.find_one({
+                                'guild_id': int(guild_id),
+                                'player_name': char_name,
+                                'player_id': player_id
+                            })
+                            if historical_doc:
+                                self.player_name_cache[cache_key] = char_name
+                                return char_name
                             
                 except Exception as db_error:
                     logger.error(f"Database lookup failed for player {player_id}: {db_error}")
             
-            # Fallback to Unknown Player
+            # Final fallback: Use truncated player ID as name hint
+            if len(player_id) >= 8:
+                fallback_name = f"Player_{player_id[:8]}"
+                logger.warning(f"Using fallback name {fallback_name} for player {player_id}")
+                return fallback_name
+            
             return "Unknown Player"
             
         except Exception as e:
