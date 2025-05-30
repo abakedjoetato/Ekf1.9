@@ -365,7 +365,7 @@ class UnifiedLogParser:
                         )
                         embeds.append(embed)
 
-                # Mission events
+                # Mission events - ONLY READY missions of level 3+
                 mission_match = self.patterns['mission_state_change'].search(line)
                 if mission_match:
                     mission_id, state = mission_match.groups()
@@ -379,37 +379,25 @@ class UnifiedLogParser:
                                 if embed:
                                     embeds.append(embed)
 
-                respawn_match = self.patterns['mission_respawn'].search(line)
-                if respawn_match:
-                    mission_id, respawn_time = respawn_match.groups()
-
-                    if not cold_start:
-                        # Only process RESPAWN for missions of level 3 or higher
-                        mission_level = self.get_mission_level(mission_id)
-                        if mission_level >= 3:
-                            embed = await self.create_mission_embed(mission_id, 'RESPAWN', int(respawn_time))
-                            if embed:
-                                embeds.append(embed)
-
-                # Airdrop events
-                airdrop_match = self.patterns['airdrop_event'].search(line) or self.patterns['airdrop_spawn'].search(line) or self.patterns['airdrop_flying'].search(line)
-                if airdrop_match:
+                # Airdrop events - ONLY flying state
+                airdrop_flying_match = self.patterns['airdrop_flying'].search(line)
+                if airdrop_flying_match:
                     if not cold_start:
                         embed = await self.create_airdrop_embed()
                         if embed:
                             embeds.append(embed)
 
-                # Helicrash events
-                helicrash_match = self.patterns['helicrash_event'].search(line) or self.patterns['helicrash_spawn'].search(line) or self.patterns['helicrash_crash'].search(line)
+                # Helicrash events - ONLY crash/ready state
+                helicrash_match = self.patterns['helicrash_event'].search(line) or self.patterns['helicrash_crash'].search(line)
                 if helicrash_match:
                     if not cold_start:
                         embed = await self.create_helicrash_embed()
                         if embed:
                             embeds.append(embed)
 
-                # Trader events
-                trader_match = self.patterns['trader_spawn'].search(line) or self.patterns['trader_event'].search(line) or self.patterns['trader_arrival'].search(line)
-                if trader_match:
+                # Trader events - ONLY arrival/ready state  
+                trader_arrival_match = self.patterns['trader_arrival'].search(line)
+                if trader_arrival_match:
                     if not cold_start:
                         embed = await self.create_trader_embed()
                         if embed:
