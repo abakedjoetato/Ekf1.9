@@ -371,18 +371,25 @@ class UnifiedLogParser:
                     mission_id, state = mission_match.groups()
 
                     if not cold_start:
-                        embed = await self.create_mission_embed(mission_id, state)
-                        if embed:
-                            embeds.append(embed)
+                        # Only process READY missions of level 3 or higher
+                        if state == 'READY':
+                            mission_level = self.get_mission_level(mission_id)
+                            if mission_level >= 3:
+                                embed = await self.create_mission_embed(mission_id, state)
+                                if embed:
+                                    embeds.append(embed)
 
                 respawn_match = self.patterns['mission_respawn'].search(line)
                 if respawn_match:
                     mission_id, respawn_time = respawn_match.groups()
 
                     if not cold_start:
-                        embed = await self.create_mission_embed(mission_id, 'RESPAWN', int(respawn_time))
-                        if embed:
-                            embeds.append(embed)
+                        # Only process RESPAWN for missions of level 3 or higher
+                        mission_level = self.get_mission_level(mission_id)
+                        if mission_level >= 3:
+                            embed = await self.create_mission_embed(mission_id, 'RESPAWN', int(respawn_time))
+                            if embed:
+                                embeds.append(embed)
 
                 # Airdrop events
                 airdrop_match = self.patterns['airdrop_event'].search(line) or self.patterns['airdrop_spawn'].search(line) or self.patterns['airdrop_flying'].search(line)
