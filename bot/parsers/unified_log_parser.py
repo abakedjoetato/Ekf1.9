@@ -700,7 +700,25 @@ class UnifiedLogParser:
                 channel = self.bot.get_channel(channel_id)
                 if channel:
                     try:
-                        await channel.send(embed=embed)
+                        # Determine which thumbnail file to attach based on embed content
+                        file_to_attach = None
+                        if embed.thumbnail and embed.thumbnail.url:
+                            thumbnail_url = embed.thumbnail.url
+                            if thumbnail_url.startswith('attachment://'):
+                                filename = thumbnail_url.replace('attachment://', '')
+                                file_path = f'./assets/{filename}'
+                                
+                                # Check if file exists and create discord.File
+                                import os
+                                if os.path.exists(file_path):
+                                    file_to_attach = discord.File(file_path, filename=filename)
+
+                        # Send with or without file attachment
+                        if file_to_attach:
+                            await channel.send(embed=embed, file=file_to_attach)
+                        else:
+                            await channel.send(embed=embed)
+                            
                         logger.info(f"✅ Sent {channel_type} event to {channel.name}")
                     except Exception as e:
                         logger.error(f"Failed to send embed: {e}")
