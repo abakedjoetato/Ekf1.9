@@ -167,9 +167,14 @@ class EmeraldKillfeedBot(commands.Bot):
         Implements requirements: global sync first, then per-guild fallback on failure
         """
         try:
-            # Get command count
-            command_count = len(self.pending_application_commands) if hasattr(self, 'pending_application_commands') else 0
+            # Get command count from the correct attribute
+            command_count = len(self.application_commands) if hasattr(self, 'application_commands') else 0
             logger.info(f"📊 {command_count} commands registered locally")
+            
+            # Debug: Show actual command names
+            if command_count > 0:
+                command_names = [cmd.name for cmd in self.application_commands]
+                logger.info(f"🔍 Commands to sync: {', '.join(command_names[:10])}{'...' if len(command_names) > 10 else ''}")
 
             if command_count == 0:
                 logger.warning("⚠️ No commands to sync")
@@ -349,12 +354,19 @@ class EmeraldKillfeedBot(commands.Bot):
             logger.info(f"🎯 Cog loading: {'✅ Complete' if cogs_success else '❌ Failed'}")
 
             # STEP 2: Wait for py-cord to process commands
+            logger.info("⏱️ Waiting 3 seconds for py-cord to process commands...")
             await asyncio.sleep(3.0)
+            logger.info("⏱️ Wait completed, proceeding to command sync...")
 
             # STEP 3: Advanced command sync with logging
             logger.info("🔧 Starting advanced command sync system...")
-            await self.register_commands_safely()
-            logger.info("✅ Command sync system completed")
+            try:
+                await self.register_commands_safely()
+                logger.info("✅ Command sync system completed")
+            except Exception as sync_error:
+                logger.error(f"❌ Command sync failed: {sync_error}")
+                import traceback
+                logger.error(f"Sync error traceback: {traceback.format_exc()}")
 
             # STEP 4: Database setup
             logger.info("🚀 Starting database and parser setup...")
