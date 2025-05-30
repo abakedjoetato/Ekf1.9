@@ -104,12 +104,12 @@ class EmeraldKillfeedBot(commands.Bot):
         logger.info("Bot initialized in production mode")
 
     async def load_cogs(self):
-        """Load all bot cogs"""
+        """Load all bot cogs using proper py-cord methods"""
         try:
             # List of cogs to load
             cogs = [
                 'bot.cogs.core',
-                'bot.cogs.admin_channels',
+                'bot.cogs.admin_channels', 
                 'bot.cogs.admin_batch',
                 'bot.cogs.linking',
                 'bot.cogs.stats',
@@ -128,58 +128,73 @@ class EmeraldKillfeedBot(commands.Bot):
 
             for cog in cogs:
                 try:
-                    self.load_extension(cog)
+                    # Use proper py-cord async cog loading
+                    await self.load_extension(cog)
                     loaded_cogs.append(cog)
                     logger.info(f"✅ Successfully loaded cog: {cog}")
                 except Exception as e:
                     failed_cogs.append(cog)
                     logger.error(f"❌ Failed to load cog {cog}: {e}")
+                    import traceback
+                    logger.error(f"Cog error traceback: {traceback.format_exc()}")
 
-            # Verify commands are registered with detailed debugging
+            # Give py-cord time to process the cogs and register commands
+            await asyncio.sleep(2)
+
+            # Force command registration refresh
             try:
-                command_count = 0
-                command_source = "none"
-                
-                # Check multiple possible command storage locations
-                if hasattr(self, 'application_commands'):
-                    command_count = len(self.application_commands)
-                    command_source = "application_commands"
-                elif hasattr(self, 'pending_application_commands'):
-                    command_count = len(self.pending_application_commands)
-                    command_source = "pending_application_commands"
-                elif hasattr(self, 'slash_commands'):
-                    command_count = len(self.slash_commands)
-                    command_source = "slash_commands"
-                
-                logger.info(f"📊 Loaded {len(loaded_cogs)}/{len(cogs)} cogs successfully")
-                logger.info(f"📊 Total slash commands registered: {command_count} (via {command_source})")
-
-                # Debug: List actual commands found
-                if command_count > 0:
-                    if command_source == "application_commands":
-                        command_names = [cmd.name for cmd in self.application_commands]
-                    elif command_source == "pending_application_commands":
-                        command_names = [cmd.name for cmd in self.pending_application_commands]
-                    elif command_source == "slash_commands":
-                        command_names = [cmd.name for cmd in self.slash_commands]
-                    logger.info(f"🔍 Commands found: {', '.join(command_names)}")
-                else:
-                    # Show what command-related attributes exist
-                    cmd_attrs = [attr for attr in dir(self) if 'command' in attr.lower()]
-                    logger.info(f"🔍 Available command attributes: {cmd_attrs}")
-                    logger.info("ℹ️ Commands will be registered after py-cord processing")
+                # Trigger py-cord's internal command processing
+                await self.process_application_commands()
             except Exception as e:
-                logger.warning(f"Command count check failed: {e}")
+                logger.warning(f"Manual command processing failed: {e}")
+
+            # Check command registration with comprehensive debugging
+            command_count = 0
+            command_source = "none"
+            command_names = []
+            
+            # Check all possible command storage locations
+            if hasattr(self, 'pending_application_commands') and self.pending_application_commands:
+                command_count = len(self.pending_application_commands)
+                command_names = [cmd.name for cmd in self.pending_application_commands]
+                command_source = "pending_application_commands"
+            elif hasattr(self, 'application_commands') and self.application_commands:
+                command_count = len(self.application_commands)
+                command_names = [cmd.name for cmd in self.application_commands]
+                command_source = "application_commands"
+            
+            logger.info(f"📊 Loaded {len(loaded_cogs)}/{len(cogs)} cogs successfully")
+            logger.info(f"📊 Total slash commands registered: {command_count} (via {command_source})")
+
+            if command_count > 0:
+                logger.info(f"🔍 Commands found: {', '.join(command_names[:10])}{'...' if len(command_names) > 10 else ''}")
+            else:
+                logger.error("❌ NO COMMANDS REGISTERED - Cog loading failed to register commands")
+                # Debug all cogs to see what they contain
+                for cog_name in loaded_cogs:
+                    try:
+                        cog_obj = self.get_cog(cog_name.split('.')[-1].title().replace('_', ''))
+                        if cog_obj:
+                            cog_commands = [cmd for cmd in dir(cog_obj) if hasattr(getattr(cog_obj, cmd), '__annotations__')]
+                            logger.debug(f"Cog {cog_name} methods: {cog_commands}")
+                    except:
+                        pass
 
             if failed_cogs:
                 logger.error(f"❌ Failed cogs: {failed_cogs}")
                 return False
-            else:
-                logger.info("✅ All cogs loaded and commands registered successfully")
-                return True
+            
+            if command_count == 0:
+                logger.error("❌ Critical: No commands registered despite successful cog loading")
+                return False
+                
+            logger.info("✅ All cogs loaded and commands registered successfully")
+            return True
 
         except Exception as e:
             logger.error(f"❌ Critical failure loading cogs: {e}")
+            import traceback
+            logger.error(f"Load cogs traceback: {traceback.format_exc()}")
             return False
 
     async def register_commands_safely(self):
@@ -386,56 +401,51 @@ class EmeraldKillfeedBot(commands.Bot):
         logger.info("🚀 Bot is ready! Starting bulletproof setup...")
 
         try:
-            # STEP 1: Load cogs FIRST
+            # STEP 1: Load cogs with proper async loading
             logger.info("🔧 Loading cogs for command registration...")
             cogs_success = await self.load_cogs()
-            logger.info(f"🎯 Cog loading: {'✅ Complete' if cogs_success else '❌ Failed'}")
-
-            # STEP 2: Wait for py-cord to process commands with active checking
-            logger.info("⏱️ Waiting for py-cord to register commands...")
-            max_wait = 10  # Maximum 10 seconds
-            wait_time = 0
             
-            while wait_time < max_wait:
-                await asyncio.sleep(1)
-                wait_time += 1
+            if not cogs_success:
+                logger.error("❌ Cog loading failed - aborting setup")
+                return
                 
-                # Check different command attributes that py-cord might use
-                cmd_count = 0
-                if hasattr(self, 'application_commands'):
-                    cmd_count = len(self.application_commands)
-                elif hasattr(self, 'pending_application_commands'):
-                    cmd_count = len(self.pending_application_commands)
-                elif hasattr(self, 'slash_commands'):
-                    cmd_count = len(self.slash_commands)
-                
-                logger.info(f"⏱️ Wait {wait_time}s - Commands detected: {cmd_count}")
-                
-                if cmd_count > 0:
-                    logger.info(f"✅ Commands registered after {wait_time}s - proceeding to sync")
-                    break
-                    
-            if wait_time >= max_wait:
-                logger.warning("⚠️ Timeout waiting for commands - proceeding anyway")
+            logger.info("✅ Cog loading: Complete")
 
-            # STEP 3: Advanced command sync with logging
-            logger.info("🔧 Starting advanced command sync system...")
+            # STEP 2: Verify commands are actually registered
+            command_count = 0
+            if hasattr(self, 'pending_application_commands'):
+                command_count = len(self.pending_application_commands)
+            elif hasattr(self, 'application_commands'):
+                command_count = len(self.application_commands)
+                
+            if command_count == 0:
+                logger.error("❌ CRITICAL: No commands found after cog loading - fix required")
+                return
+                
+            logger.info(f"✅ {command_count} commands registered and ready for sync")
+
+            # STEP 3: Command sync - simplified and robust
+            logger.info("🔧 Starting command sync...")
             try:
                 await self.register_commands_safely()
-                logger.info("✅ Command sync system completed")
+                logger.info("✅ Command sync completed")
             except Exception as sync_error:
                 logger.error(f"❌ Command sync failed: {sync_error}")
-                import traceback
-                logger.error(f"Sync error traceback: {traceback.format_exc()}")
 
             # STEP 4: Database setup
             logger.info("🚀 Starting database and parser setup...")
             db_success = await self.setup_database()
-            logger.info(f"📊 Database setup: {'✅ Success' if db_success else '❌ Failed'}")
+            if not db_success:
+                logger.error("❌ Database setup failed")
+                return
+            logger.info("✅ Database setup: Success")
 
             # STEP 5: Scheduler setup
             scheduler_success = self.setup_scheduler()
-            logger.info(f"⏰ Scheduler setup: {'✅ Success' if scheduler_success else '❌ Failed'}")
+            if not scheduler_success:
+                logger.error("❌ Scheduler setup failed")
+                return
+            logger.info("✅ Scheduler setup: Success")
 
             # STEP 6: Schedule parsers
             if self.killfeed_parser:
@@ -487,6 +497,8 @@ class EmeraldKillfeedBot(commands.Bot):
 
         except Exception as e:
             logger.error(f"❌ Critical error in bot setup: {e}")
+            import traceback
+            logger.error(f"Setup error traceback: {traceback.format_exc()}")
             raise
 
     async def on_guild_join(self, guild):
