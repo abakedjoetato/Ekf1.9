@@ -42,6 +42,7 @@ class UnifiedLogParser:
         self.player_lifecycle: Dict[str, Dict[str, Any]] = {}
         self.server_status: Dict[str, Dict[str, Any]] = {}
         self.log_file_hashes: Dict[str, str] = {}
+        self.server_queues: Dict[str, int] = {}
 
         # Player name resolution cache
         self.player_name_cache: Dict[str, str] = {}
@@ -690,4 +691,146 @@ class UnifiedLogParser:
             if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
                 return None
 
-            guild_config =
+            guild_config = await self.bot.db_manager.get_guild(guild_id)
+            if not guild_config:
+                return None
+
+            # Find channel ID for the specified type
+            server_channels = guild_config.get('server_channels', {})
+            for server_key, channels in server_channels.items():
+                if isinstance(channels, dict) and channel_type in channels:
+                    return channels[channel_type]
+            
+            # Fallback to legacy channels
+            legacy_channels = guild_config.get('channels', {})
+            if isinstance(legacy_channels, dict) and channel_type in legacy_channels:
+                return legacy_channels[channel_type]
+            
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting channel for type {channel_type}: {e}")
+            return None
+
+
+    async def _load_persistent_state(self):
+        """Load persistent state from database"""
+        try:
+            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                logger.warning("Database manager not available for state loading")
+                return
+
+            # Load parser state from database
+            state_doc = await self.bot.db_manager.db['parser_state'].find_one({'_id': 'unified_parser'})
+            if state_doc:
+                self.file_states = state_doc.get('file_states', {})
+                self.last_log_position = state_doc.get('last_log_position', {})
+                logger.info(f"Loaded persistent state for {len(self.file_states)} servers")
+            else:
+                logger.info("No persistent state found, starting fresh")
+
+        except Exception as e:
+            logger.error(f"Failed to load persistent state: {e}")
+
+    async def _save_persistent_state(self):
+        """Save persistent state to database"""
+        try:
+            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                return
+
+            state_doc = {
+                '_id': 'unified_parser',
+                'file_states': self.file_states,
+                'last_log_position': self.last_log_position,
+                'last_updated': datetime.now(timezone.utc).isoformat()
+            }
+
+            await self.bot.db_manager.db['parser_state'].replace_one(
+                {'_id': 'unified_parser'},
+                state_doc,
+                upsert=True
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to save persistent state: {e}")
+
+    async def resolve_player_name(self, player_id: str, guild_id: str) -> str:
+        """Resolve player name from various sources"""
+        try:
+            # Check player lifecycle first
+            lifecycle_key = f"{guild_id}_{player_id}"
+            if lifecycle_key in self.player_lifecycle:
+                name = self.player_lifecycle[lifecycle_key].get('name')
+                if name:
+                    return name
+
+            # Check current sessions
+            session_key = f"{guild_id}_{player_id}"
+            if session_key in self.player_sessions:
+                name = self.player_sessions[session_key].get('player_name')
+                if name:
+                    return name
+
+            # Check name cache
+            if player_id in self.player_name_cache:
+                return self.player_name_cache[player_id]
+
+            # Try database lookup
+            if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
+                player_doc = await self.bot.db_manager.db['players'].find_one({'player_id': player_id})
+                if player_doc and player_doc.get('player_name'):
+                    name = player_doc['player_name']
+                    self.player_name_cache[player_id] = name
+                    return name
+
+            # Fallback
+            return f"Player_{player_id[:8]}"
+
+        except Exception as e:
+            logger.error(f"Failed to resolve player name: {e}")
+            return f"Player_{player_id[:8] if player_id else 'Unknown'}"
+
+    async def run_log_parser(self):
+        """Main log parser runner method"""
+        try:
+            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                logger.warning("Database manager not available for log parsing")
+                return
+
+            # Get all guilds with servers
+            guilds_cursor = self.bot.db_manager.guilds.find({'servers': {'$exists': True, '$ne': []}})
+            guilds = await guilds_cursor.to_list(length=None)
+
+            for guild_config in guilds:
+                guild_id = str(guild_config.get('_id'))
+                servers = guild_config.get('servers', [])
+
+                for server in servers:
+                    server_id = str(server.get('_id'))
+                    server_name = server.get('name', 'Unknown Server')
+
+                    try:
+                        # Get log content
+                        content = await self.get_log_content(server)
+                        if not content:
+                            continue
+
+                        # Parse content
+                        embeds = await self.parse_log_content(
+                            content, guild_id, server_id, 
+                            cold_start=False, server_name=server_name
+                        )
+
+                        # Send embeds via batch sender if available
+                        if embeds and hasattr(self.bot, 'batch_sender'):
+                            channel_id = await self.get_channel_for_type(int(guild_id), server_id, 'killfeed')
+                            if channel_id:
+                                for embed in embeds:
+                                    await self.bot.batch_sender.add_to_queue(channel_id, embed=embed)
+
+                    except Exception as e:
+                        logger.error(f"Error parsing logs for server {server_id}: {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"Log parser run failed: {e}")
