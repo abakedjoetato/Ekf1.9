@@ -1,3 +1,4 @@
+"""Update UnifiedLogParser to track server queues and format voice channel names."""
 """
 Emerald's Killfeed - Unified Log Parser System
 BULLETPROOF VERSION - Complete overhaul for 100% reliability
@@ -41,7 +42,7 @@ class UnifiedLogParser:
         self.player_lifecycle: Dict[str, Dict[str, Any]] = {}
         self.server_status: Dict[str, Dict[str, Any]] = {}
         self.log_file_hashes: Dict[str, str] = {}
-        
+
         # Player name resolution cache
         self.player_name_cache: Dict[str, str] = {}
 
@@ -312,13 +313,18 @@ class UnifiedLogParser:
                         final_name = clean_name if clean_name else player_name.strip()
                     except Exception:
                         final_name = player_name.strip()
-                    
+
                     self.player_lifecycle[f"{guild_id}_{player_id}"] = {
                         'name': final_name,
                         'raw_name': player_name,  # Keep original for debugging
                         'queued_at': datetime.now(timezone.utc).isoformat()
                     }
                     logger.debug(f"👤 Player queued: {player_id} -> '{final_name}' (raw: '{player_name}')")
+
+                    # Update server queue count
+                    if server_id not in self.server_queues:
+                        self.server_queues[server_id] = 0
+                    self.server_queues[server_id] += 1
 
                 register_match = self.patterns['player_registered'].search(line)
                 if register_match:
@@ -338,7 +344,7 @@ class UnifiedLogParser:
                     }
 
                     # Update voice channel
-                    await self.update_voice_channel(str(guild_id))
+                    await self.update_voice_channel(str(guild_id), server_id)
 
                     # Create embed (only if not cold start)
                     if not cold_start:
@@ -367,7 +373,7 @@ class UnifiedLogParser:
                         player_name = await self.resolve_player_name(player_id, guild_id)
 
                     # Update voice channel
-                    await self.update_voice_channel(str(guild_id))
+                    await self.update_voice_channel(str(guild_id), server_id)
 
                     # Create embed (only if not cold start)
                     if not cold_start:
@@ -533,7 +539,7 @@ class UnifiedLogParser:
         # Vehicle embeds are suppressed per task requirements
         return None
 
-    async def update_voice_channel(self, guild_id: str):
+    async def update_voice_channel(self, guild_id: str, server_id: str):
         """BULLETPROOF voice channel update"""
         try:
             # Convert guild_id to int with better validation
@@ -549,16 +555,6 @@ class UnifiedLogParser:
                     return
             else:
                 guild_id_int = guild_id
-
-            # Count active players with better key validation
-            guild_prefix = f"{guild_id}_"
-            active_players = 0
-
-            for key, session in self.player_sessions.items():
-                if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
-                    active_players += 1
-
-            logger.debug(f"Counted {active_players} active players for guild {guild_id_int}")
 
             # Get guild config with validation
             if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
@@ -616,6 +612,39 @@ class UnifiedLogParser:
                 logger.debug(f"No voice channel configured for guild {guild_id_int}")
                 return
 
+            # Get server config to get server name and max player count
+            server_config = None
+            for server in guild_config.get('servers', []):
+                if str(server.get('_id')) == server_id:
+                    server_config = server
+                    break
+
+            if not server_config:
+                logger.warning(f"Could not find server config for server ID: {server_id}")
+                return
+
+            server_name = server_config.get('name', 'Unknown Server')
+            max_player_count = server_config.get('max_player_count', 50)
+            if not isinstance(max_player_count, int):
+                try:
+                    max_player_count = int(max_player_count)
+                except ValueError:
+                    logger.warning(f"Invalid max_player_count: {max_player_count}. Using default value of 50")
+                    max_player_count = 50
+            
+            # Count active players with better key validation
+            guild_prefix = f"{guild_id}_"
+            active_players = 0
+
+            for key, session in self.player_sessions.items():
+                if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
+                    active_players += 1
+
+            #Get queue count
+            queue_count = self.server_queues.get(server_id, 0)
+
+            logger.debug(f"Counted {active_players} active players for guild {guild_id_int}")
+
             # Update the channel with rate limit protection
             guild = self.bot.get_guild(guild_id_int)
             if not guild:
@@ -631,7 +660,11 @@ class UnifiedLogParser:
                 logger.warning(f"Channel {voice_channel_id} is not a voice channel")
                 return
 
-            new_name = f"🟢 Players Online: {active_players}"
+            # Format the voice channel name according to the specifications
+            new_name = f"{server_name}:{active_players}/{max_player_count}"
+            if queue_count > 0:
+                new_name += f" - {queue_count} In Queue"
+
             if voice_channel.name != new_name:
                 try:
                     await voice_channel.edit(name=new_name)
@@ -657,378 +690,4 @@ class UnifiedLogParser:
             if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
                 return None
 
-            guild_config = await self.bot.db_manager.get_guild(guild_id)
-            if not guild_config:
-                return None
-
-            server_channels = guild_config.get('server_channels', {})
-
-            # Server-specific channel
-            if server_id in server_channels and channel_type in server_channels[server_id]:
-                return server_channels[server_id][channel_type]
-
-            # Default server channel
-            if 'default' in server_channels and channel_type in server_channels['default']:
-                return server_channels['default'][channel_type]
-
-            # Fallback to killfeed if no specific channel
-            if channel_type != 'killfeed':
-                killfeed_id = None
-                if server_id in server_channels:
-                    killfeed_id = server_channels[server_id].get('killfeed')
-                if not killfeed_id and 'default' in server_channels:
-                    killfeed_id = server_channels['default'].get('killfeed')
-                if killfeed_id:
-                    return killfeed_id
-
-            # Legacy fallback
-            return guild_config.get('channels', {}).get(channel_type)
-
-        except Exception as e:
-            logger.error(f"Error getting channel: {e}")
-            return None
-
-    async def send_embeds(self, guild_id: int, server_id: str, embeds: List[discord.Embed]):
-        """Send embeds to appropriate channels"""
-        if not embeds:
-            return
-
-        try:
-            for embed in embeds:
-                # Determine channel type
-                channel_type = 'events'
-                if embed.title:
-                    title_lower = embed.title.lower()
-                    if any(word in title_lower for word in ['connect', 'disconnect', 'join', 'left']):
-                        channel_type = 'connections'
-
-                # Get channel
-                channel_id = await self.get_channel_for_type(guild_id, server_id, channel_type)
-                if not channel_id:
-                    continue
-
-                channel = self.bot.get_channel(channel_id)
-                if channel:
-                    try:
-                        # Determine which thumbnail file to attach based on embed content
-                        file_to_attach = None
-                        if embed.thumbnail and embed.thumbnail.url:
-                            thumbnail_url = embed.thumbnail.url
-                            if thumbnail_url.startswith('attachment://'):
-                                filename = thumbnail_url.replace('attachment://', '')
-                                file_path = f'./assets/{filename}'
-                                
-                                # Check if file exists and create discord.File
-                                import os
-                                if os.path.exists(file_path):
-                                    file_to_attach = discord.File(file_path, filename=filename)
-
-                        # Send with or without file attachment
-                        if file_to_attach:
-                            await channel.send(embed=embed, file=file_to_attach)
-                        else:
-                            await channel.send(embed=embed)
-                            
-                        logger.info(f"✅ Sent {channel_type} event to {channel.name}")
-                    except Exception as e:
-                        logger.error(f"Failed to send embed: {e}")
-
-        except Exception as e:
-            logger.error(f"Error sending embeds: {e}")
-
-    async def parse_server_logs(self, guild_id: int, server: dict):
-        """Parse logs for a single server"""
-        try:
-            server_id = str(server.get('_id', 'unknown'))
-            server_name = server.get('name', 'Unknown')
-            host = server.get('host', 'unknown')
-
-            logger.info(f"🔍 Processing {server_name} (ID: {server_id}, Host: {host})")
-
-            if not host or not server_id or host == 'unknown' or server_id == 'unknown':
-                logger.warning(f"❌ Invalid server config: {server_name}")
-                return
-
-            # Get log content
-            content = await self.get_log_content(server)
-            if not content:
-                logger.warning(f"❌ No log content for {server_name}")
-                return
-
-            # Determine if cold start
-            server_key = f"{guild_id}_{server_id}"
-            file_state = self.file_states.get(server_key, {})
-            is_cold_start = not file_state.get('cold_start_complete', False)
-
-            # Parse content with server context
-            embeds = await self.parse_log_content(content, str(guild_id), server_id, is_cold_start, server_name)
-
-            # Send embeds (only if not cold start)
-            if not is_cold_start and embeds:
-                await self.send_embeds(guild_id, server_id, embeds)
-
-            logger.info(f"✅ {server_name}: {'Cold start' if is_cold_start else f'{len(embeds)} events'}")
-
-        except Exception as e:
-            logger.error(f"Error parsing server {server.get('name', 'Unknown')}: {e}")
-
-    async def run_log_parser(self):
-        """Main parser entry point"""
-        try:
-            logger.info("🔄 Running unified log parser...")
-
-            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
-                logger.error("❌ Database not available")
-                return
-
-            # Get all guilds
-            guilds_cursor = self.bot.db_manager.guilds.find({})
-            guilds_list = await guilds_cursor.to_list(length=None)
-
-            if not guilds_list:
-                logger.info("No guilds found")
-                return
-
-            total_processed = 0
-
-            for guild_doc in guilds_list:
-                guild_id = guild_doc.get('guild_id')
-                if not guild_id:
-                    continue
-
-                try:
-                    guild_id = int(guild_id)
-                except:
-                    continue
-
-                guild_name = guild_doc.get('name', f'Guild {guild_id}')
-                servers = guild_doc.get('servers', [])
-
-                if not servers:
-                    continue
-
-                logger.info(f"📡 Processing {len(servers)} servers for {guild_name}")
-
-                for server in servers:
-                    try:
-                        await self.parse_server_logs(guild_id, server)
-                        total_processed += 1
-                    except Exception as e:
-                        logger.error(f"Server parse error: {e}")
-
-            logger.info(f"✅ Parser completed: {total_processed} servers processed")
-
-        except Exception as e:
-            logger.error(f"Parser run failed: {e}")
-
-    async def _load_persistent_state(self):
-        """Load state from database"""
-        try:
-            if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
-                state_doc = await self.bot.db_manager.db['parser_state'].find_one({'_id': 'unified_parser_state'})
-                if state_doc and 'file_states' in state_doc:
-                    self.file_states = state_doc['file_states']
-                    logger.info(f"✅ Loaded state for {len(self.file_states)} servers")
-        except Exception as e:
-            logger.error(f"State load failed: {e}")
-
-    async def _save_persistent_state(self):
-        """Save state to database"""
-        try:
-            if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
-                state_doc = {
-                    '_id': 'unified_parser_state',
-                    'file_states': self.file_states,
-                    'last_updated': datetime.now(timezone.utc).isoformat()
-                }
-                await self.bot.db_manager.db['parser_state'].replace_one(
-                    {'_id': 'unified_parser_state'},
-                    state_doc,
-                    upsert=True
-                )
-        except Exception as e:
-            logger.error(f"State save failed: {e}")
-
-    def get_parser_status(self) -> Dict[str, Any]:
-        """Get parser status"""
-        try:
-            active_sessions = sum(1 for session in self.player_sessions.values() if session.get('status') == 'online')
-            
-            # Calculate active players by guild
-            active_players_by_guild = {}
-            for key, session in self.player_sessions.items():
-                if session.get('status') == 'online':
-                    guild_id = session.get('guild_id', 'unknown')
-                    active_players_by_guild[guild_id] = active_players_by_guild.get(guild_id, 0) + 1
-            
-            # Check SFTP connection status
-            active_connections = 0
-            for conn in self.sftp_connections.values():
-                try:
-                    if not conn.is_closed():
-                        active_connections += 1
-                except:
-                    pass
-            
-            return {
-                'active_sessions': active_sessions,
-                'total_tracked_servers': len(self.file_states),
-                'sftp_connections': active_connections,
-                'connection_status': f"{active_connections}/{len(self.sftp_connections)} active",
-                'active_players_by_guild': active_players_by_guild,
-                'status': 'healthy' if active_sessions >= 0 else 'error'
-            }
-        except Exception as e:
-            logger.error(f"Error getting parser status: {e}")
-            return {
-                'active_sessions': 0,
-                'total_tracked_servers': 0,
-                'sftp_connections': 0,
-                'connection_status': 'error',
-                'active_players_by_guild': {},
-                'status': 'error'
-            }
-
-    def reset_parser_state(self):
-        """Reset all parser state"""
-        try:
-            self.file_states.clear()
-            self.player_sessions.clear()
-            self.player_lifecycle.clear()
-            self.last_log_position.clear()
-            self.log_file_hashes.clear()
-            if hasattr(self, 'server_status'):
-                self.server_status.clear()
-            logger.info("✅ Parser state reset")
-        except Exception as e:
-            logger.error(f"Error resetting parser state: {e}")
-
-    async def resolve_player_name(self, player_id: str, guild_id: str) -> str:
-        """Resolve player name from ID using comprehensive database and session cache"""
-        try:
-            # Check cache first
-            cache_key = f"{guild_id}_{player_id}"
-            if cache_key in self.player_name_cache:
-                return self.player_name_cache[cache_key]
-            
-            # Check current session lifecycle first (most recent) - this should have the actual name
-            lifecycle_key = f"{guild_id}_{player_id}"
-            if lifecycle_key in self.player_lifecycle:
-                name = self.player_lifecycle[lifecycle_key].get('name')
-                if name and name.strip() and name != 'Unknown Player':
-                    # Clean up the name (URL decode and normalize)
-                    import urllib.parse
-                    try:
-                        # URL decode the name (handles %20 for spaces, etc.)
-                        decoded_name = urllib.parse.unquote(name)
-                        # Further clean up any remaining artifacts
-                        clean_name = decoded_name.replace('+', ' ').strip()
-                        if clean_name and clean_name != 'Unknown Player':
-                            self.player_name_cache[cache_key] = clean_name
-                            logger.info(f"✅ Resolved player name from lifecycle: {player_id} -> {clean_name}")
-                            return clean_name
-                    except Exception as decode_error:
-                        logger.warning(f"Failed to decode player name '{name}': {decode_error}")
-                        # Use original name if decoding fails
-                        if name.strip():
-                            self.player_name_cache[cache_key] = name.strip()
-                            return name.strip()
-            
-            # Check database with multiple methods
-            if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
-                try:
-                    # Method 1: Check PvP data collection (most comprehensive) - search by player_id
-                    pvp_doc = await self.bot.db_manager.pvp_data.find_one({
-                        'guild_id': int(guild_id),
-                        'player_id': player_id
-                    })
-                    
-                    if pvp_doc:
-                        name = pvp_doc.get('player_name')
-                        if name and name.strip() and name != 'Unknown Player':
-                            self.player_name_cache[cache_key] = name
-                            logger.info(f"✅ Resolved player name from PvP data: {player_id} -> {name}")
-                            return name
-                    
-                    # Method 2: Search PvP data by partial player_id match (sometimes IDs change)
-                    partial_id = player_id[:8] if len(player_id) > 8 else player_id
-                    pvp_cursor = self.bot.db_manager.pvp_data.find({
-                        'guild_id': int(guild_id),
-                        'player_id': {'$regex': f'^{partial_id}', '$options': 'i'}
-                    }).sort('last_updated', -1).limit(1)
-                    
-                    async for pvp_doc in pvp_cursor:
-                        name = pvp_doc.get('player_name')
-                        if name and name.strip() and name != 'Unknown Player':
-                            self.player_name_cache[cache_key] = name
-                            logger.info(f"✅ Resolved player name from partial ID match: {player_id} -> {name}")
-                            # Update the record with correct player_id
-                            try:
-                                await self.bot.db_manager.pvp_data.update_one(
-                                    {'_id': pvp_doc['_id']},
-                                    {'$set': {'player_id': player_id}}
-                                )
-                            except:
-                                pass
-                            return name
-                    
-                    # Method 3: Check linked players table
-                    player_doc = await self.bot.db_manager.players.find_one({
-                        'guild_id': int(guild_id),
-                        'player_id': player_id
-                    })
-                    
-                    if player_doc:
-                        # Use primary character or first linked character
-                        name = player_doc.get('primary_character') or (player_doc.get('linked_characters', [None])[0])
-                        if name and name.strip() and name != 'Unknown Player':
-                            self.player_name_cache[cache_key] = name
-                            logger.info(f"✅ Resolved player name from linked players: {player_id} -> {name}")
-                            return name
-                    
-                    # Method 4: Check if player has ever been linked to Discord by searching characters
-                    linked_cursor = self.bot.db_manager.players.find({
-                        'guild_id': int(guild_id),
-                        'linked_characters': {'$exists': True, '$ne': []}
-                    })
-                    
-                    async for linked_doc in linked_cursor:
-                        # Try to find this player_id in historical data for any of these characters
-                        for char_name in linked_doc.get('linked_characters', []):
-                            historical_doc = await self.bot.db_manager.pvp_data.find_one({
-                                'guild_id': int(guild_id),
-                                'player_name': char_name,
-                                'player_id': player_id
-                            })
-                            if historical_doc:
-                                self.player_name_cache[cache_key] = char_name
-                                logger.info(f"✅ Resolved player name from historical data: {player_id} -> {char_name}")
-                                return char_name
-                            
-                except Exception as db_error:
-                    logger.error(f"Database lookup failed for player {player_id}: {db_error}")
-            
-            # Final fallback: Use truncated player ID as name hint but make it more obvious it's a fallback
-            if len(player_id) >= 8:
-                fallback_name = f"Player_{player_id[:8]}"
-                logger.warning(f"⚠️ Using fallback name {fallback_name} for player {player_id} - name not found in logs or database")
-                return fallback_name
-            
-            logger.warning(f"⚠️ Could not resolve player name for {player_id} - returning Unknown Player")
-            return "Unknown Player"
-            
-        except Exception as e:
-            logger.error(f"Error resolving player name for {player_id}: {e}")
-            return "Unknown Player"
-
-    def get_active_player_count(self, guild_id: str) -> int:
-        """Get active player count for a guild"""
-        try:
-            guild_prefix = f"{guild_id}_"
-            return sum(
-                1 for key, session in self.player_sessions.items()
-                if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online'
-            )
-        except Exception as e:
-            logger.error(f"Error getting active player count: {e}")
-            return 0
+            guild_config =
