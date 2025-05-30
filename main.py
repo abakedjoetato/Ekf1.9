@@ -233,10 +233,10 @@ class EmeraldKillfeedBot(commands.Bot):
                     break
                     
                 try:
-                    # Use py-cord specific guild sync method
-                    synced = await asyncio.wait_for(self.sync_commands(guild=guild), timeout=15)
+                    # Use py-cord specific guild sync method with guild_ids parameter
+                    await asyncio.wait_for(self.sync_commands(guild_ids=[guild.id]), timeout=15)
                     success_count += 1
-                    logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name} ({len(synced) if synced else 0} commands)")
+                    logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name}")
                     
                     # Small delay between guild syncs to avoid rate limits
                     if success_count < len(self.guilds):
