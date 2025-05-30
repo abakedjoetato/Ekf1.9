@@ -55,8 +55,8 @@ class UnifiedLogParser:
     def _compile_patterns(self) -> Dict[str, re.Pattern]:
         """Compile regex patterns for log parsing"""
         return {
-            # Player connection patterns
-            'player_queue_join': re.compile(r'LogNet: Join request: /Game/Maps/world_\d+/World_\d+\?.*eosid=\|([a-f0-9]+).*Name=([^&\?]+)', re.IGNORECASE),
+            # Player connection patterns - improved to capture player names better
+            'player_queue_join': re.compile(r'LogNet: Join request: /Game/Maps/world_\d+/World_\d+\?.*eosid=\|([a-f0-9]+).*Name=([^&\?\s]+)', re.IGNORECASE),
             'player_registered': re.compile(r'LogOnline: Warning: Player \|([a-f0-9]+) successfully registered!', re.IGNORECASE),
             'player_disconnect': re.compile(r'UChannel::Close: Sending CloseBunch.*UniqueId: EOS:\|([a-f0-9]+)', re.IGNORECASE),
 
@@ -302,10 +302,23 @@ class UnifiedLogParser:
                 queue_match = self.patterns['player_queue_join'].search(line)
                 if queue_match:
                     player_id, player_name = queue_match.groups()
+                    # Clean and decode the player name immediately
+                    import urllib.parse
+                    try:
+                        # URL decode the name (handles %20 for spaces, etc.)
+                        decoded_name = urllib.parse.unquote(player_name)
+                        # Further clean up any remaining artifacts
+                        clean_name = decoded_name.replace('+', ' ').strip()
+                        final_name = clean_name if clean_name else player_name.strip()
+                    except Exception:
+                        final_name = player_name.strip()
+                    
                     self.player_lifecycle[f"{guild_id}_{player_id}"] = {
-                        'name': player_name,
+                        'name': final_name,
+                        'raw_name': player_name,  # Keep original for debugging
                         'queued_at': datetime.now(timezone.utc).isoformat()
                     }
+                    logger.debug(f"👤 Player queued: {player_id} -> '{final_name}' (raw: '{player_name}')")
 
                 register_match = self.patterns['player_registered'].search(line)
                 if register_match:
@@ -898,29 +911,33 @@ class UnifiedLogParser:
             if cache_key in self.player_name_cache:
                 return self.player_name_cache[cache_key]
             
-            # Check current session lifecycle first (most recent)
-            if cache_key in self.player_lifecycle:
-                name = self.player_lifecycle[cache_key].get('name')
+            # Check current session lifecycle first (most recent) - this should have the actual name
+            lifecycle_key = f"{guild_id}_{player_id}"
+            if lifecycle_key in self.player_lifecycle:
+                name = self.player_lifecycle[lifecycle_key].get('name')
                 if name and name.strip() and name != 'Unknown Player':
-                    self.player_name_cache[cache_key] = name
-                    return name
+                    # Clean up the name (URL decode and normalize)
+                    import urllib.parse
+                    try:
+                        # URL decode the name (handles %20 for spaces, etc.)
+                        decoded_name = urllib.parse.unquote(name)
+                        # Further clean up any remaining artifacts
+                        clean_name = decoded_name.replace('+', ' ').strip()
+                        if clean_name and clean_name != 'Unknown Player':
+                            self.player_name_cache[cache_key] = clean_name
+                            logger.info(f"✅ Resolved player name from lifecycle: {player_id} -> {clean_name}")
+                            return clean_name
+                    except Exception as decode_error:
+                        logger.warning(f"Failed to decode player name '{name}': {decode_error}")
+                        # Use original name if decoding fails
+                        if name.strip():
+                            self.player_name_cache[cache_key] = name.strip()
+                            return name.strip()
             
             # Check database with multiple methods
             if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
                 try:
-                    # Method 1: Check linked players table
-                    player_doc = await self.bot.db_manager.players.find_one({
-                        'guild_id': int(guild_id),
-                        'player_id': player_id
-                    })
-                    
-                    if player_doc:
-                        name = player_doc.get('player_name')
-                        if name and name.strip() and name != 'Unknown Player':
-                            self.player_name_cache[cache_key] = name
-                            return name
-                    
-                    # Method 2: Check PvP data collection (most comprehensive)
+                    # Method 1: Check PvP data collection (most comprehensive) - search by player_id
                     pvp_doc = await self.bot.db_manager.pvp_data.find_one({
                         'guild_id': int(guild_id),
                         'player_id': player_id
@@ -930,19 +947,21 @@ class UnifiedLogParser:
                         name = pvp_doc.get('player_name')
                         if name and name.strip() and name != 'Unknown Player':
                             self.player_name_cache[cache_key] = name
+                            logger.info(f"✅ Resolved player name from PvP data: {player_id} -> {name}")
                             return name
                     
-                    # Method 3: Search PvP data by partial player_id match (sometimes IDs change)
+                    # Method 2: Search PvP data by partial player_id match (sometimes IDs change)
                     partial_id = player_id[:8] if len(player_id) > 8 else player_id
                     pvp_cursor = self.bot.db_manager.pvp_data.find({
                         'guild_id': int(guild_id),
                         'player_id': {'$regex': f'^{partial_id}', '$options': 'i'}
-                    }).sort('timestamp', -1).limit(1)
+                    }).sort('last_updated', -1).limit(1)
                     
                     async for pvp_doc in pvp_cursor:
                         name = pvp_doc.get('player_name')
                         if name and name.strip() and name != 'Unknown Player':
                             self.player_name_cache[cache_key] = name
+                            logger.info(f"✅ Resolved player name from partial ID match: {player_id} -> {name}")
                             # Update the record with correct player_id
                             try:
                                 await self.bot.db_manager.pvp_data.update_one(
@@ -953,13 +972,27 @@ class UnifiedLogParser:
                                 pass
                             return name
                     
-                    # Method 4: Check if player has ever been linked to Discord
-                    linked_doc = await self.bot.db_manager.players.find_one({
+                    # Method 3: Check linked players table
+                    player_doc = await self.bot.db_manager.players.find_one({
                         'guild_id': int(guild_id),
-                        'linked_characters': {'$exists': True}
+                        'player_id': player_id
                     })
                     
-                    if linked_doc and 'linked_characters' in linked_doc:
+                    if player_doc:
+                        # Use primary character or first linked character
+                        name = player_doc.get('primary_character') or (player_doc.get('linked_characters', [None])[0])
+                        if name and name.strip() and name != 'Unknown Player':
+                            self.player_name_cache[cache_key] = name
+                            logger.info(f"✅ Resolved player name from linked players: {player_id} -> {name}")
+                            return name
+                    
+                    # Method 4: Check if player has ever been linked to Discord by searching characters
+                    linked_cursor = self.bot.db_manager.players.find({
+                        'guild_id': int(guild_id),
+                        'linked_characters': {'$exists': True, '$ne': []}
+                    })
+                    
+                    async for linked_doc in linked_cursor:
                         # Try to find this player_id in historical data for any of these characters
                         for char_name in linked_doc.get('linked_characters', []):
                             historical_doc = await self.bot.db_manager.pvp_data.find_one({
@@ -969,17 +1002,19 @@ class UnifiedLogParser:
                             })
                             if historical_doc:
                                 self.player_name_cache[cache_key] = char_name
+                                logger.info(f"✅ Resolved player name from historical data: {player_id} -> {char_name}")
                                 return char_name
                             
                 except Exception as db_error:
                     logger.error(f"Database lookup failed for player {player_id}: {db_error}")
             
-            # Final fallback: Use truncated player ID as name hint
+            # Final fallback: Use truncated player ID as name hint but make it more obvious it's a fallback
             if len(player_id) >= 8:
                 fallback_name = f"Player_{player_id[:8]}"
-                logger.warning(f"Using fallback name {fallback_name} for player {player_id}")
+                logger.warning(f"⚠️ Using fallback name {fallback_name} for player {player_id} - name not found in logs or database")
                 return fallback_name
             
+            logger.warning(f"⚠️ Could not resolve player name for {player_id} - returning Unknown Player")
             return "Unknown Player"
             
         except Exception as e:
