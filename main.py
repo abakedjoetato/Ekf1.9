@@ -128,8 +128,8 @@ class EmeraldKillfeedBot(commands.Bot):
 
             for cog in cogs:
                 try:
-                    # Use proper py-cord async cog loading
-                    await self.load_extension(cog)
+                    # Use synchronous load_extension (not awaitable in this py-cord version)
+                    self.load_extension(cog)
                     loaded_cogs.append(cog)
                     logger.info(f"✅ Successfully loaded cog: {cog}")
                 except Exception as e:
@@ -140,13 +140,6 @@ class EmeraldKillfeedBot(commands.Bot):
 
             # Give py-cord time to process the cogs and register commands
             await asyncio.sleep(2)
-
-            # Force command registration refresh
-            try:
-                # Trigger py-cord's internal command processing
-                await self.process_application_commands()
-            except Exception as e:
-                logger.warning(f"Manual command processing failed: {e}")
 
             # Check command registration with comprehensive debugging
             command_count = 0
